@@ -380,6 +380,64 @@ def get_request_org(user: Dict[str, Any], x_org_slug: Optional[str]) -> str:
 
 
 
+
+
+def _seed_default_summit_codes(db: Session, org: str = "public") -> None:
+    """Create default Summit access codes if they do not already exist.
+
+    This avoids manual DB inserts in Railway when SUMMIT_MODE is enabled.
+    Codes are stored only as SHA-256 hashes and are created idempotently.
+    """
+    seeds = [
+        {
+            "id": "seed_summit2026_public",
+            "plain_code": "SUMMIT2026",
+            "label": "Participante Summit",
+            "source": "invite",
+            "max_uses": 5000,
+            "expires_days": 30,
+            "created_by": "system_seed",
+        },
+        {
+            "id": "seed_efata777_public",
+            "plain_code": "EFATA777",
+            "label": "Investidor",
+            "source": "invite",
+            "max_uses": 200,
+            "expires_days": 90,
+            "created_by": "system_seed",
+        },
+    ]
+
+    for item in seeds:
+        code_hash = hashlib.sha256(item["plain_code"].strip().upper().encode()).hexdigest()
+        existing = db.execute(
+            select(SignupCode).where(
+                SignupCode.org_slug == org,
+                SignupCode.code_hash == code_hash,
+            )
+        ).scalar_one_or_none()
+        if existing:
+            continue
+
+        now = now_ts()
+        sc = SignupCode(
+            id=item["id"],
+            org_slug=org,
+            code_hash=code_hash,
+            label=item["label"],
+            source=item["source"],
+            expires_at=now + int(item["expires_days"]) * 86400,
+            max_uses=int(item["max_uses"]),
+            used_count=0,
+            active=True,
+            created_at=now,
+            created_by=item["created_by"],
+        )
+        db.add(sc)
+
+    db.commit()
+
 def ensure_core_agents(db: Session, org: str) -> None:
     """Ensure the 3 core agents exist for the org (solo-supervised setup).
     Creates: Orkio (CEO) [default], Chris (VP/CFO), Orion (CTO).
@@ -1201,6 +1259,18 @@ def _startup():
             from .db import Base  # type: ignore
             Base.metadata.create_all(bind=ENGINE)
         _run_with_timeout(_do_create_all, "CREATE_ALL", timeout_sec=15)
+
+        # Auto-seed Summit codes to avoid manual DB edits in Railway UI.
+        def _do_seed_summit_codes():
+            from .db import SessionLocal  # type: ignore
+            if SessionLocal is None:
+                return
+            db = SessionLocal()
+            try:
+                _seed_default_summit_codes(db, org=default_tenant() or "public")
+            finally:
+                db.close()
+        _run_with_timeout(_do_seed_summit_codes, "SEED_SUMMIT_CODES", timeout_sec=15)
 
     # ADMIN_API_KEY is optional. If not set, admin access is granted only via admin-role JWT.
     # (ADMIN_EMAILS controls who becomes admin on register/login.)
